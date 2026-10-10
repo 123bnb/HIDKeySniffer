@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 // ============================================================
-// HIDKeySniffer v1.0.5 —— App 进程自 dump 诊断版（基于 v1.0.4 实机签名修正）
+// HIDKeySniffer v1.0.6 —— App 进程自 dump 诊断版（基于 v1.0.4 实机签名修正）
 // 注入：番茄小说 com.dragon.read
 // v1.0.4 dump 已确认的 iOS16.4.1 真实入口（签名全部来自实机日志）：
 //   UIEventFetcher         -_receiveHIDEvent:     v24@0:8^{__IOHIDEvent=}16   ← 所有HID事件唯一入口
@@ -134,11 +134,13 @@ static void *HKImp6(id self, SEL _cmd, id evt) {
         SEL s1 = NSSelectorFromString(@"keyboardMouseKeyToggle");
         SEL s2 = NSSelectorFromString(@"digitizerTouch");
         if ([evt respondsToSelector:s1]) {
-            uint32_t (*f)(id, SEL) = (uint32_t (*)(id, SEL))objc_msgSend;
+            IMP imp = [evt methodForSelector:s1];
+            uint32_t (*f)(id, SEL) = (uint32_t (*)(id, SEL))imp;
             HKLog("    keyboardMouseKeyToggle=%u", f(evt, s1));
         }
         if ([evt respondsToSelector:s2]) {
-            uint32_t (*f)(id, SEL) = (uint32_t (*)(id, SEL))objc_msgSend;
+            IMP imp = [evt methodForSelector:s2];
+            uint32_t (*f)(id, SEL) = (uint32_t (*)(id, SEL))imp;
             HKLog("    digitizerTouch=%u", f(evt, s2));
         }
     } else {
@@ -186,7 +188,7 @@ static void HKInit() {
         pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
     }
     HKLog("==================================================");
-    HKLog("HIDKeySniffer v1.0.5 已注入 %s (pid=%d)", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid());
+    HKLog("HIDKeySniffer v1.0.6 已注入 %s (pid=%d)", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid());
     HKLog("容器日志路径: %s", gContainerPath);
     HKLog("IOKit解析: type=%d sender=%d int=%d float=%d",
           pGetType != NULL, pGetSender != NULL, pGetInt != NULL, pGetFloat != NULL);
