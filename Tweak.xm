@@ -1,3 +1,4 @@
+#import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
@@ -9,7 +10,7 @@
 #include <unistd.h>
 
 // ============================================================
-// HIDKeySniffer v1.0.0 —— backboardd 层 HID 键码抓取
+// HIDKeySniffer v1.0.1 —— backboardd 层 HID 键码抓取
 // 目标：拿到蓝牙翻页器 7 键的真实 HID 键码（usage/keyCode）
 // 日志：/var/mobile/Documents/HIDKeySniffer.log（root 可写，Filza 可读）
 // 安全：只读 + 打日志，不吞事件不修改，原调用原样放行
@@ -37,15 +38,13 @@ static void HKLog(const char *fmt, ...) {
     }
 }
 
-// ---------- IOKit 函数（dlsym 动态解析，避免头文件依赖） ----------
+// ---------- IOKit 函数（dlsym 动态解析） ----------
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
 typedef uint32_t (*IOHIDEventGetIntegerValue_t)(void *, uint32_t);
-typedef uint64_t (*IOHIDEventGetTime_t)(void *);
 static IOHIDEventGetType_t pGetType = NULL;
 static IOHIDEventGetSenderID_t pGetSender = NULL;
 static IOHIDEventGetIntegerValue_t pGetInt = NULL;
-static IOHIDEventGetTime_t pGetTime = NULL;
 
 // IOHIDEvent 字段（IOHIDEventField 公共值）：
 //   kIOHIDEventFieldKeyboardUsagePage = 0x0E
@@ -62,40 +61,40 @@ static void HKHandleEvent(void *event) {
           type, (unsigned long long)sender, usagePage, keyCode, usage);
 }
 
-// ---------- 独立 orig/imp 对（每个候选方法独立保存原实现，避免互相覆盖递归） ----------
-static void *(*gOrig1)(id, SEL, id);
+// ---------- 独立 orig/imp 对（每个候选方法独立保存原实现，避免覆盖递归） ----------
+static IMP gOrig1;
 static void *HKImp1(id self, SEL _cmd, id event) {
-    HKHandleEvent((void *)event);
-    return gOrig1(self, _cmd, event);
+    HKHandleEvent((__bridge void *)event);
+    return ((void *(*)(id, SEL, id))gOrig1)(self, _cmd, event);
 }
-static void *(*gOrig2)(id, SEL, id);
+static IMP gOrig2;
 static void *HKImp2(id self, SEL _cmd, id event) {
-    HKHandleEvent((void *)event);
-    return gOrig2(self, _cmd, event);
+    HKHandleEvent((__bridge void *)event);
+    return ((void *(*)(id, SEL, id))gOrig2)(self, _cmd, event);
 }
-static void *(*gOrig3)(id, SEL, id);
+static IMP gOrig3;
 static void *HKImp3(id self, SEL _cmd, id event) {
-    HKHandleEvent((void *)event);
-    return gOrig3(self, _cmd, event);
+    HKHandleEvent((__bridge void *)event);
+    return ((void *(*)(id, SEL, id))gOrig3)(self, _cmd, event);
 }
-static void *(*gOrig4)(id, SEL, id);
+static IMP gOrig4;
 static void *HKImp4(id self, SEL _cmd, id event) {
-    HKHandleEvent((void *)event);
-    return gOrig4(self, _cmd, event);
+    HKHandleEvent((__bridge void *)event);
+    return ((void *(*)(id, SEL, id))gOrig4)(self, _cmd, event);
 }
-static void *(*gOrig5)(id, SEL, id);
+static IMP gOrig5;
 static void *HKImp5(id self, SEL _cmd, id event) {
-    HKHandleEvent((void *)event);
-    return gOrig5(self, _cmd, event);
+    HKHandleEvent((__bridge void *)event);
+    return ((void *(*)(id, SEL, id))gOrig5)(self, _cmd, event);
 }
 
-// 探测并 hook：方法存在才替换，不存在只打日志（避免 Logos 对不存在 selector 意外 addMethod）
-static void HKSwizzle(Class cls, const char *selName, void *(*origSlot)(id, SEL, id), IMP newImp) {
-    if (!cls) { HKLog("[探测] 类不存在 (className=?) -%s 跳过", selName); return; }
+// 探测并 hook：方法存在才替换，不存在只打日志
+static void HKSwizzle(Class cls, const char *selName, IMP *origSlot, IMP newImp) {
+    if (!cls) { HKLog("[探测] 类不存在 -%s 跳过", selName); return; }
     SEL sel = sel_registerName(selName);
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) { HKLog("[探测] %s -%s 不存在，跳过", class_getName(cls), selName); return; }
-    *origSlot = (void *(*)(id, SEL, id))method_getImplementation(m);
+    *origSlot = method_getImplementation(m);
     method_setImplementation(m, newImp);
     HKLog("[探测] %s -%s 已hook ✓", class_getName(cls), selName);
 }
@@ -107,12 +106,11 @@ static void HKInit() {
         pGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
         pGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
         pGetInt = (IOHIDEventGetIntegerValue_t)dlsym(iokit, "IOHIDEventGetIntegerValue");
-        pGetTime = (IOHIDEventGetTime_t)dlsym(iokit, "IOHIDEventGetTime");
     }
     HKLog("==================================================");
-    HKLog("HIDKeySniffer v1.0.0 已注入 backboardd (pid=%d)", getpid());
-    HKLog("IOKit解析: type=%d sender=%d int=%d time=%d",
-          pGetType != NULL, pGetSender != NULL, pGetInt != NULL, pGetTime != NULL);
+    HKLog("HIDKeySniffer v1.0.1 已注入 backboardd (pid=%d)", getpid());
+    HKLog("IOKit解析: type=%d sender=%d int=%d",
+          pGetType != NULL, pGetSender != NULL, pGetInt != NULL);
 
     // 诊断：列出含 HID 的类（供下版锁定正确 hook 点）
     int count = 0;
