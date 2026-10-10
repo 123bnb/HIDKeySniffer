@@ -45,10 +45,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=HIDKeySniffer-1.0.7-roothide.deb
+          DEB=HIDKeySniffer-1.0.8-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.7
-          NOTES=$'HIDKeySniffer v1.0.7（roothide 直装）—— 翻页器=Digitizer 触摸确认版\n\n【重大突破】v1.0.6 实机日志确认：\n你的翻页器在 iOS 眼里是 HID Digitizer（触摸输入设备）！\n7 键全部以 type=11 触摸事件进入番茄小说进程（_UIHIDTransformer/_UIUpdateHIDDigitizerInput 都能收到），\n不依赖辅助触控开关。音量键（键盘consumer）是系统级，不经过 App UI 层。\n\n【本版做什么】\n1. 过滤心跳刷屏（type=17 compat + type=11 空闲事件不再打日志）\n2. hook _UIHIDTransformer.handleHIDEvent: 返回值 → 打印 UIKit 转换结果：\n   UIEvent type/subtype + 每根 UITouch 的 phase/坐标/pathIdentity/touchIdentifier\n3. 正确解析 digitizer float 字段（X=0x23/Y=0x24/事件掩码/索引/身份）\n\n【怎么测】\n1. 装 v1.0.7 → 注销\n2. 打开番茄小说，手指不碰屏幕，只按翻页器 7 键（每键按 1 次，间隔 1 秒）\n3. 把容器 Documents/HIDKeySniffer.log 发我\n\n【安全】只读不修改，原事件原样放行'
+          TAG=v1.0.8
+          NOTES=$'HIDKeySniffer v1.0.8（roothide 直装）—— 展开数组+子事件+sendEvent 直取版\n\n【v1.0.7 实机结论】\n1. 翻页器按键 = type=11 Digitizer 事件流（sender=0x1000008ef），确实进番茄小说进程 ✓\n2. _UIHIDTransformer.handleHIDEvent: 返回的是 __NSSingleObjectArrayI（数组，非 UIEvent）\n3. digitizer 根事件字段全 0 → 真实坐标/按钮在 IOHIDEvent 子事件里\n\n【本版做什么】\n1. 遍历 IOHIDEvent 子事件（最多2层），递归打印 type/坐标/按钮\n2. 展开 handleHIDEvent: 返回的数组，打印每个元素 isa + description\n3. 新增 hook UIApplication -sendEvent:（UIKit 分发最终入口），打印 UIEvent 全细节\n   （type/subtype/allTouches/每根 touch 的 phase/坐标/pathIdentity/touchIdentifier）\n4. 按键组分隔线：事件间隔 >0.5s 打一行分隔，7 键一眼分开\n\n【怎么测】\n1. 装 v1.0.8 → 注销\n2. 打开番茄小说，手指不碰屏幕，只按翻页器 7 键（每键按 1 次，间隔 2 秒）\n3. 复制完整日志发我（滚到最底部，别截断）\n\n【安全】只读不修改，原事件原样放行'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
