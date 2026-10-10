@@ -5,7 +5,7 @@
 # 日志：App 容器 Documents/HIDKeySniffer.log（保底可写）+ /var/mobile/Documents（试写）
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.5
+PACKAGE_VERSION := 1.0.6
 
 DEBUG = 0
 ARCHS = arm64 arm64e
