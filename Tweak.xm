@@ -85,7 +85,7 @@ static uint32_t HKReadIvar(id obj, const char *name, size_t size) {
     Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
     if (!iv) return 0xFFFFFFFF;
     uint64_t val = 0;
-    memcpy(&val, (char *)obj + ivar_getOffset(iv), size);
+    memcpy(&val, (char *)(__bridge void *)obj + ivar_getOffset(iv), size);
     return (uint32_t)val;
 }
 
@@ -93,7 +93,7 @@ static uint32_t HKReadIvar(id obj, const char *name, size_t size) {
 static void HKPrintTouch(UITouch *t) {
     if (!t) { HKLog("        touch=NULL"); return; }
     CGPoint loc = [t locationInView:t.view];
-    CGPoint wloc = t.window ? [t locationInWindow:t.window] : CGPointZero;
+    CGPoint wloc = t.window ? [t locationInView:t.window] : CGPointZero;
     uint32_t pathId = HKReadIvar(t, "_pathIdentity", 1);
     uint32_t touchId = HKReadIvar(t, "_touchIdentifier", 4);
     HKLog("        touch phase=%ld loc=(%.1f,%.1f) win=(%.1f,%.1f) pathId=%u touchId=%u",
@@ -166,7 +166,7 @@ static void *HKImp2(id self, SEL _cmd, void *event) {
     return ((void *(*)(id, SEL, void *))gOrig2)(self, _cmd, event);
 }
 static IMP gOrig3;
-static void *HKImp3(id self, SEL _cmd, void *event) {
+static id HKImp3(id self, SEL _cmd, void *event) {
     HKLog("[入口] _UIHIDTransformer.handleHIDEvent:");
     HKPrintEvent(event);
     id result = ((id (*)(id, SEL, void *))gOrig3)(self, _cmd, event);
