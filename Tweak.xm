@@ -6,19 +6,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <ctype.h>
 #include <dlfcn.h>
 #include <sys/time.h>
 #include <unistd.h>
 
 // ============================================================
-// HIDKeySniffer v1.0.4 —— App 进程自 dump 诊断版
-// 注入：番茄小说 com.dragon.read（7 键事件必然到达的进程）
-// 目的：dump 出 iOS16.4.1 真实 HID hook 点 + 7 键完整事件树 + 设备指纹
+// HIDKeySniffer v1.0.5 —— App 进程自 dump 诊断版（基于 v1.0.4 实机签名修正）
+// 注入：番茄小说 com.dragon.read
+// v1.0.4 dump 已确认的 iOS16.4.1 真实入口（签名全部来自实机日志）：
+//   UIEventFetcher         -_receiveHIDEvent:     v24@0:8^{__IOHIDEvent=}16   ← 所有HID事件唯一入口
+//   UIApplication          -handleKeyHIDEvent:    v24@0:8^{__IOHIDEvent=}16   ← 键盘类事件
+//   _UIHIDTransformer      -handleHIDEvent:       @24@0:8^{__IOHIDEvent=}16   ← UIKit转换入口
+//   _UIUpdateHIDInput      -addEvent:             v24@0:8^{__IOHIDEvent=}16
+//   _UIUpdateHIDDigitizerInput -addEvent:         v24@0:8^{__IOHIDEvent=}16
+//   HIDEventService        -dispatchEvent:        v24@0:8@16                  ← 设备服务派发(id参数)
 // 安全：只读 + 打日志，不吞事件不修改，原调用原样放行
-// 日志：App 容器 Documents（保底可写）+ /var/mobile/Documents（试写）
 // ============================================================
 
-// ---------- 日志（双路径，App 沙盒内至少容器 Documents 可写） ----------
+// ---------- 日志（双路径） ----------
 static const char *gContainerPath = NULL;
 static const char *gGlobalPath = "/var/mobile/Documents/HIDKeySniffer.log";
 
@@ -48,157 +54,128 @@ static void HKLog(const char *fmt, ...) {
     }
 }
 
-// ---------- IOKit 函数（dlsym 动态解析，避免头文件依赖） ----------
+// ---------- IOKit 函数（dlsym） ----------
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
 typedef uint32_t (*IOHIDEventGetIntegerValue_t)(void *, uint32_t);
-typedef void *(*IOHIDEventGetChild_t)(void *, uint32_t);
-typedef void *(*IOHIDEventGetNext_t)(void *);
+typedef double (*IOHIDEventGetFloatValue_t)(void *, uint32_t);
 static IOHIDEventGetType_t pGetType = NULL;
 static IOHIDEventGetSenderID_t pGetSender = NULL;
 static IOHIDEventGetIntegerValue_t pGetInt = NULL;
-static IOHIDEventGetChild_t pGetChild = NULL;
-static IOHIDEventGetNext_t pGetNext = NULL;
+static IOHIDEventGetFloatValue_t pGetFloat = NULL;
 
-// IOHIDEvent 字段（IOHIDEventField 公共值，供参考）
-// 0x01 PositionX 0x02 PositionY 0x03 ButtonNumber 0x04 ButtonState
-// 0x0A ScrollX 0x0B ScrollY 0x0E KeyboardUsagePage 0x0F KeyboardKeyCode 0x10 KeyboardUsage
-static void HKPrintEventTree(void *event, int depth) {
-    if (!event || depth > 4) return;
+// ---------- 事件打印（IOHIDEventRef） ----------
+static void HKPrintEvent(void *event) {
+    if (!event) { HKLog("    event=NULL"); return; }
     uint32_t type = pGetType ? pGetType(event) : 0xFFFFFFFF;
     uint64_t sender = pGetSender ? pGetSender(event) : 0;
-    uint32_t v;
-    v = pGetInt ? pGetInt(event, 0x0E) : 0; uint32_t usagePage = v;
-    v = pGetInt ? pGetInt(event, 0x0F) : 0; uint32_t keyCode = v;
-    v = pGetInt ? pGetInt(event, 0x10) : 0; uint32_t usage = v;
-    v = pGetInt ? pGetInt(event, 0x01) : 0; uint32_t posX = v;
-    v = pGetInt ? pGetInt(event, 0x02) : 0; uint32_t posY = v;
-    v = pGetInt ? pGetInt(event, 0x03) : 0; uint32_t btn = v;
-    v = pGetInt ? pGetInt(event, 0x04) : 0; uint32_t btnState = v;
-    v = pGetInt ? pGetInt(event, 0x0A) : 0; uint32_t scrollX = v;
-    v = pGetInt ? pGetInt(event, 0x0B) : 0; uint32_t scrollY = v;
-    char pad[16];
-    memset(pad, ' ', depth * 2);
-    pad[depth * 2] = 0;
-    HKLog("%s[evt] type=%u sender=0x%llx usagePage=0x%x keyCode=0x%x usage=0x%x pos=(%u,%u) btn=%u st=%u scroll=(%u,%u)",
-          pad, type, (unsigned long long)sender, usagePage, keyCode, usage,
-          posX, posY, btn, btnState, scrollX, scrollY);
-    if (pGetChild && pGetNext) {
-        void *child = pGetChild(event, 0);
-        while (child) {
-            HKPrintEventTree(child, depth + 1);
-            child = pGetNext(child);
+    Class isa = object_getClass((__bridge id)event);
+    HKLog("    type=%u sender=0x%llx isa=%s",
+          type, (unsigned long long)sender, isa ? class_getName(isa) : "?");
+    if (!pGetInt) return;
+    uint32_t usagePage = pGetInt(event, 0x0E);
+    uint32_t keyCode  = pGetInt(event, 0x0F);
+    uint32_t usage    = pGetInt(event, 0x10);
+    uint32_t posX     = pGetInt(event, 0x01);
+    uint32_t posY     = pGetInt(event, 0x02);
+    uint32_t btn      = pGetInt(event, 0x03);
+    uint32_t btnState = pGetInt(event, 0x04);
+    uint32_t sx       = pGetInt(event, 0x0A);
+    uint32_t sy       = pGetInt(event, 0x0B);
+    HKLog("    usagePage=0x%x keyCode=0x%x usage=0x%x pos=(%u,%u) btn=%u st=%u scroll=(%u,%u)",
+          usagePage, keyCode, usage, posX, posY, btn, btnState, sx, sy);
+    if (pGetFloat) {
+        double fx = pGetFloat(event, 0x23);
+        double fy = pGetFloat(event, 0x24);
+        if (fx != 0.0 || fy != 0.0) {
+            HKLog("    floatX=%f floatY=%f", fx, fy);
         }
     }
 }
 
-// ---------- 独立 orig/imp 对（每个候选方法独立保存原实现） ----------
+// ---------- 独立 orig/imp 对 ----------
 static IMP gOrig1;
 static void *HKImp1(id self, SEL _cmd, void *event) {
-    HKLog("[evt-入口] UIEventFetcher _receiveHIDEvent:");
-    HKPrintEventTree(event, 0);
+    HKLog("[入口] UIEventFetcher -_receiveHIDEvent:");
+    HKPrintEvent(event);
     return ((void *(*)(id, SEL, void *))gOrig1)(self, _cmd, event);
 }
 static IMP gOrig2;
-static void *HKImp2(id self, SEL _cmd, id event) {
-    HKLog("[evt-入口] UIApplication handleKeyHIDEvent: 参数isa=%s",
-          event ? object_getClassName(event) : "nil");
-    HKPrintEventTree((__bridge void *)event, 0);
-    return ((void *(*)(id, SEL, id))gOrig2)(self, _cmd, event);
+static void *HKImp2(id self, SEL _cmd, void *event) {
+    HKLog("[入口] UIApplication -handleKeyHIDEvent:");
+    HKPrintEvent(event);
+    return ((void *(*)(id, SEL, void *))gOrig2)(self, _cmd, event);
 }
 static IMP gOrig3;
 static void *HKImp3(id self, SEL _cmd, void *event) {
-    HKLog("[evt-入口] UIApplication handleHIDEvent:");
-    HKPrintEventTree(event, 0);
+    HKLog("[入口] _UIHIDTransformer -handleHIDEvent:");
+    HKPrintEvent(event);
     return ((void *(*)(id, SEL, void *))gOrig3)(self, _cmd, event);
 }
 static IMP gOrig4;
-static void *HKImp4(id self, SEL _cmd, id events) {
-    HKLog("[evt-入口] UIEventFetcher filterEvents: 参数isa=%s",
-          events ? object_getClassName(events) : "nil");
-    if ([events isKindOfClass:[NSArray class]]) {
-        HKLog("[evt-入口] filterEvents: 数组元素数=%lu", (unsigned long)[(NSArray *)events count]);
-        for (NSUInteger i = 0; i < [(NSArray *)events count] && i < 8; i++) {
-            id item = [(NSArray *)events objectAtIndex:i];
-            if (item == nil) { HKLog("  [%lu] nil", (unsigned long)i); continue; }
-            CFTypeID tid = CFGetTypeID((__bridge CFTypeRef)item);
-            HKLog("  [%lu] isa=%s cfTypeID=%lu", (unsigned long)i, object_getClassName(item), (unsigned long)tid);
-        }
-    }
-    return ((void *(*)(id, SEL, id))gOrig4)(self, _cmd, events);
+static void *HKImp4(id self, SEL _cmd, void *event) {
+    HKLog("[入口] _UIUpdateHIDInput -addEvent:");
+    HKPrintEvent(event);
+    return ((void *(*)(id, SEL, void *))gOrig4)(self, _cmd, event);
 }
 static IMP gOrig5;
 static void *HKImp5(id self, SEL _cmd, void *event) {
-    HKLog("[evt-入口] BKSHIDEventRouterManager handleHIDEvent:");
-    HKPrintEventTree(event, 0);
+    HKLog("[入口] _UIUpdateHIDDigitizerInput -addEvent:");
+    HKPrintEvent(event);
     return ((void *(*)(id, SEL, void *))gOrig5)(self, _cmd, event);
 }
 static IMP gOrig6;
-static void *HKImp6(id self, SEL _cmd, void *event) {
-    HKLog("[evt-入口] BKSHIDEventRouter handleEvent:");
-    HKPrintEventTree(event, 0);
-    return ((void *(*)(id, SEL, void *))gOrig6)(self, _cmd, event);
+static void *HKImp6(id self, SEL _cmd, id evt) {
+    HKLog("[入口] HIDEventService -dispatchEvent:");
+    if (evt) {
+        Class isa = object_getClass(evt);
+        HKLog("    isa=%s", isa ? class_getName(isa) : "?");
+        // 尝试安全调用 HIDEvent 类的无参字段方法（dump 已见其存在）
+        SEL s1 = NSSelectorFromString(@"keyboardMouseKeyToggle");
+        SEL s2 = NSSelectorFromString(@"digitizerTouch");
+        if ([evt respondsToSelector:s1]) {
+            uint32_t (*f)(id, SEL) = (uint32_t (*)(id, SEL))objc_msgSend;
+            HKLog("    keyboardMouseKeyToggle=%u", f(evt, s1));
+        }
+        if ([evt respondsToSelector:s2]) {
+            uint32_t (*f)(id, SEL) = (uint32_t (*)(id, SEL))objc_msgSend;
+            HKLog("    digitizerTouch=%u", f(evt, s2));
+        }
+    } else {
+        HKLog("    evt=NULL");
+    }
+    return ((void *(*)(id, SEL, id))gOrig6)(self, _cmd, evt);
 }
 
-// hook 单个候选：仅当方法存在 且 恰好 1 个对象参数（签名 v24@0:8@16 这类）才替换
-static void HKSwizzle(Class cls, const char *selName, IMP *origSlot, IMP newImp) {
-    if (!cls) { HKLog("[探测] 类不存在 -%s 跳过", selName); return; }
-    SEL sel = sel_registerName(selName);
+// ---------- hook：按 v1.0.4 dump 出的真实签名（needle 匹配）----------
+typedef struct {
+    const char *clsName;
+    const char *selName;
+    const char *encNeedle;   // 期望的 typeEncoding 特征
+    IMP *origSlot;
+    IMP newImp;
+} HKHookSpec;
+
+static void HKSwizzleSpec(HKHookSpec *spec) {
+    Class cls = NSClassFromString([NSString stringWithUTF8String:spec->clsName]);
+    if (!cls) { HKLog("[探测] 类不存在 %s 跳过", spec->clsName); return; }
+    SEL sel = sel_registerName(spec->selName);
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) { HKLog("[探测] %s -%s 不存在，跳过", class_getName(cls), selName); return; }
+    if (!m) { HKLog("[探测] %s -%s 不存在，跳过", spec->clsName, spec->selName); return; }
     const char *enc = method_getTypeEncoding(m);
-    // 数 @ 个数：格式 返回@self:_cmd:arg1...  => arg 数 = @数 - 2
-    int ats = 0;
-    for (const char *p = enc; p && *p; p++) if (*p == '@') ats++;
-    if (ats - 2 != 1) {
-        HKLog("[探测] %s -%s 签名=%s（参数数=%d）跳过，待下版处理", class_getName(cls), selName, enc, ats - 2);
+    if (!strstr(enc, spec->encNeedle)) {
+        HKLog("[探测] %s -%s 签名=%s（期望含 %s）不匹配，跳过", spec->clsName, spec->selName, enc, spec->encNeedle);
         return;
     }
-    *origSlot = method_getImplementation(m);
-    method_setImplementation(m, newImp);
-    HKLog("[探测] %s -%s 已hook ✓ 签名=%s", class_getName(cls), selName, enc);
-}
-
-// 枚举含 HID/Event/Touch/Key 的类及其方法（供确认真实 hook 点）
-static void HKDumpClasses(void) {
-    unsigned int count = 0;
-    Class *classes = objc_copyClassList(&count);
-    int printed = 0;
-    for (unsigned int i = 0; i < count && printed < 60; i++) {
-        const char *name = class_getName(classes[i]);
-        if (!strstr(name, "HID") && !strstr(name, "Event") && !strstr(name, "Touch")
-            && !strstr(name, "Key") && !strstr(name, "BKS") && !strstr(name, "IOKit")) continue;
-        // 只打印关注类
-        if (!strstr(name, "HID") && !strstr(name, "EventFetcher") && !strstr(name, "UIApplication")
-            && !strstr(name, "BKSHID") && !strstr(name, "BKHID")) continue;
-        unsigned int mc = 0;
-        Method *ms = class_copyMethodList(classes[i], &mc);
-        int shown = 0;
-        char line[2048];
-        int off = 0;
-        off += snprintf(line + off, sizeof(line) - off, "[类] %s:", name);
-        for (unsigned int j = 0; j < mc && shown < 24; j++) {
-            const char *mn = sel_getName(method_getName(ms[j]));
-            if (!strstr(mn, "HID") && !strstr(mn, "Event") && !strstr(mn, "Key")
-                && !strstr(mn, "Touch") && !strstr(mn, "filter")) continue;
-            const char *enc = method_getTypeEncoding(ms[j]);
-            int l = snprintf(line + off, sizeof(line) - off, " -%s %s", mn, enc ? enc : "?");
-            off += l;
-            if (off > (int)sizeof(line) - 200) break;
-            shown++;
-        }
-        if (shown) HKLog("%s", line);
-        free(ms);
-        printed++;
-    }
-    free(classes);
+    *(spec->origSlot) = method_getImplementation(m);
+    method_setImplementation(m, spec->newImp);
+    HKLog("[探测] %s -%s 已hook ✓ 签名=%s", spec->clsName, spec->selName, enc);
 }
 
 __attribute__((constructor))
 static void HKInit() {
     NSString *home = NSHomeDirectory();
-    NSString *docDir = [home stringByAppendingPathComponent:@"Documents"];
-    NSString *logPath = [docDir stringByAppendingPathComponent:@"HIDKeySniffer.log"];
+    NSString *logPath = [[home stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"HIDKeySniffer.log"];
     gContainerPath = strdup([logPath UTF8String]);
 
     void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
@@ -206,25 +183,23 @@ static void HKInit() {
         pGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
         pGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
         pGetInt = (IOHIDEventGetIntegerValue_t)dlsym(iokit, "IOHIDEventGetIntegerValue");
-        pGetChild = (IOHIDEventGetChild_t)dlsym(iokit, "IOHIDEventGetChild");
-        pGetNext = (IOHIDEventGetNext_t)dlsym(iokit, "IOHIDEventGetNext");
+        pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
     }
     HKLog("==================================================");
-    HKLog("HIDKeySniffer v1.0.4 已注入 %s (pid=%d)", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid());
+    HKLog("HIDKeySniffer v1.0.5 已注入 %s (pid=%d)", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid());
     HKLog("容器日志路径: %s", gContainerPath);
-    HKLog("全局日志路径: %s", gGlobalPath);
-    HKLog("IOKit解析: type=%d sender=%d int=%d child=%d next=%d",
-          pGetType != NULL, pGetSender != NULL, pGetInt != NULL, pGetChild != NULL, pGetNext != NULL);
-    HKLog("--- 类/方法 dump 开始 ---");
-    HKDumpClasses();
-    HKLog("--- 类/方法 dump 结束 ---");
+    HKLog("IOKit解析: type=%d sender=%d int=%d float=%d",
+          pGetType != NULL, pGetSender != NULL, pGetInt != NULL, pGetFloat != NULL);
     HKLog("--- hook 开始 ---");
-    HKSwizzle(NSClassFromString(@"UIEventFetcher"), "_receiveHIDEvent:", &gOrig1, (IMP)HKImp1);
-    HKSwizzle(NSClassFromString(@"UIApplication"), "handleKeyHIDEvent:", &gOrig2, (IMP)HKImp2);
-    HKSwizzle(NSClassFromString(@"UIApplication"), "handleHIDEvent:", &gOrig3, (IMP)HKImp3);
-    HKSwizzle(NSClassFromString(@"UIEventFetcher"), "filterEvents:", &gOrig4, (IMP)HKImp4);
-    HKSwizzle(NSClassFromString(@"BKSHIDEventRouterManager"), "handleHIDEvent:", &gOrig5, (IMP)HKImp5);
-    HKSwizzle(NSClassFromString(@"BKSHIDEventRouter"), "handleEvent:", &gOrig6, (IMP)HKImp6);
+    HKHookSpec specs[] = {
+        { "UIEventFetcher", "_receiveHIDEvent:", "^{__IOHIDEvent=}", &gOrig1, (IMP)HKImp1 },
+        { "UIApplication", "handleKeyHIDEvent:", "^{__IOHIDEvent=}", &gOrig2, (IMP)HKImp2 },
+        { "_UIHIDTransformer", "handleHIDEvent:", "^{__IOHIDEvent=}", &gOrig3, (IMP)HKImp3 },
+        { "_UIUpdateHIDInput", "addEvent:", "^{__IOHIDEvent=}", &gOrig4, (IMP)HKImp4 },
+        { "_UIUpdateHIDDigitizerInput", "addEvent:", "^{__IOHIDEvent=}", &gOrig5, (IMP)HKImp5 },
+        { "HIDEventService", "dispatchEvent:", "v24@0:8@16", &gOrig6, (IMP)HKImp6 },
+    };
+    for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) HKSwizzleSpec(&specs[i]);
     HKLog("--- hook 结束 ---");
     HKLog("初始化完成。关闭辅助触控，在番茄小说里 7 键各按 2~3 下");
     HKLog("==================================================");
