@@ -108,22 +108,9 @@ static void HKInit() {
         pGetInt = (IOHIDEventGetIntegerValue_t)dlsym(iokit, "IOHIDEventGetIntegerValue");
     }
     HKLog("==================================================");
-    HKLog("HIDKeySniffer v1.0.1 已注入 backboardd (pid=%d)", getpid());
+    HKLog("HIDKeySniffer v1.0.2 已注入 backboardd (pid=%d)", getpid());
     HKLog("IOKit解析: type=%d sender=%d int=%d",
           pGetType != NULL, pGetSender != NULL, pGetInt != NULL);
-
-    // 诊断：列出含 HID 的类（供下版锁定正确 hook 点）
-    int count = 0;
-    Class *classes = objc_copyClassList(&count);
-    int printed = 0;
-    for (int i = 0; i < count && printed < 50; i++) {
-        const char *name = class_getName(classes[i]);
-        if (strstr(name, "HID")) {
-            HKLog("[类] %s", name);
-            printed++;
-        }
-    }
-    free(classes);
 
     // hook 候选（存在才 hook，多个候选提高命中率）
     HKSwizzle(NSClassFromString(@"BKHIDEventRouterManager"), "handleHIDEvent:", &gOrig1, (IMP)HKImp1);
