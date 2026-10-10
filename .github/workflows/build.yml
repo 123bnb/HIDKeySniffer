@@ -1,0 +1,56 @@
+name: Build HIDKeySniffer
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone Theos (roothide fork)
+        run: git clone --recursive --depth=1 https://github.com/roothide/theos.git "$THEOS"
+
+      - name: Get iOS 16.5 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          sparse-checkout: iPhoneOS16.5.sdk
+          path: theos/sdks
+
+      - name: Install dpkg & ldid
+        run: brew install dpkg ldid
+
+      - name: Build roothide deb
+        run: |
+          make clean
+          make package THEOS_PACKAGE_SCHEME=roothide
+          echo "===== 产物 ====="
+          ls -la packages/
+          DEB=$(ls packages/*.deb | head -1)
+          echo "deb=$DEB"
+          dpkg-deb -f "$DEB" | grep -E '^(Package|Version|Architecture):'
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RAW=$(ls packages/*.deb | head -1)
+          DEB=HIDKeySniffer-1.0.0-roothide.deb
+          cp "$RAW" "$DEB"
+          TAG=v1.0.0
+          NOTES=$'HIDKeySniffer v1.0.0（roothide 直装）—— backboardd 层 HID 键码抓取\n\n【做什么】\n注入 backboardd（HID 事件源头），读取蓝牙翻页器每个键的 HID type/senderID/keyCode/usage，\n写日志到 /var/mobile/Documents/HIDKeySniffer.log（Filza 可读，root 权限全局路径）\n\n【为什么】\n之前的 Preferences 层抓取只能拿到 UIKit 净化后的触摸轨迹（且依赖辅助触控把方向键转成触摸）；\n本版直接在 backboardd 拿原始 HID 事件字段，目标键码表：\n音量+=0xE9 音量-=0xEA 上=0x52 下=0x51 左=0x50 右=0x4F 点击=0x28（标准 HID Keyboard/Consumer usage）\n\n【怎么测】\n1. 安装 → 注销（backboardd 会重启）\n2. 关闭辅助触控\n3. 用翻页器 7 键各按 2~3 下\n4. Filza 打开 /var/mobile/Documents/HIDKeySniffer.log 查看每键键码\n\n【注意】只读不修改，原事件原样放行；万一异常进安全模式，卸载即可恢复'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DEB" --clobber
+          else
+            gh release create "$TAG" "$DEB" --title "HIDKeySniffer v1.0.0" --notes "$NOTES"
+          fi
