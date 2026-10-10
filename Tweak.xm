@@ -12,17 +12,17 @@
 #include <unistd.h>
 
 // ============================================================
-// HIDKeySniffer v1.0.7 —— 翻页器=HID Digitizer 触摸设备确认版
-// 实机结论（v1.0.6 日志）：
-//   翻页器按键 = type=11 Digitizer 触摸事件，直接进前台 App 的
-//   _UIHIDTransformer.handleHIDEvent: / _UIUpdateHIDDigitizerInput.addEvent:
-//   音量键（键盘consumer）不经过 App UI 层（KVO 方案另行处理）
-// v1.0.7 目标：
-//   1. 过滤心跳刷屏（type=17 compat 空事件、type=11 空闲事件）
-//   2. hook _UIHIDTransformer.handleHIDEvent: 返回值，打印 UIKit 转换结果
-//      （UIEvent type/subtype + 每根 UITouch 的 phase/坐标/pathIdentity/touchIdentifier）
-//   3. 正确解析 digitizer float 字段（X=0x23 Y=0x24 等），区分翻页器 vs 手指
-// 安全：只读 + 打日志，不吞事件不修改，原调用原样放行
+// HIDKeySniffer v1.0.8 —— 展开数组 + 子事件 + sendEvent 直取版
+// v1.0.7 实机结论：
+//   _UIHIDTransformer.handleHIDEvent: 返回 __NSSingleObjectArrayI（数组！非UIEvent）
+//   digitizer 根事件字段全 0 → 真实数据在 IOHIDEvent 子事件（树结构）里
+//  翻页器按键 = type=11 Digitizer sender=0x1000008ef 1ms级密集事件流
+// v1.0.8 目标：
+//   1. 遍历 IOHIDEvent 子事件，递归打印 type/坐标/按钮（数据在 child）
+//   2. 展开 handleHIDEvent: 返回数组的元素 isa + description
+//   3. 新增 hook UIApplication -sendEvent:（UIKit 分发最终入口）打印 UIEvent 全细节
+//   4. 按键组分隔线：事件间隔 >0.5s 打印分隔，7 键一眼分开
+// 安全：只读 + 打日志，不吞事件不修改
 // ============================================================
 
 static const char *gContainerPath = NULL;
@@ -53,10 +53,17 @@ typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
 typedef uint32_t (*IOHIDEventGetIntegerValue_t)(void *, uint32_t);
 typedef double (*IOHIDEventGetFloatValue_t)(void *, uint32_t);
+typedef CFArrayRef (*IOHIDEventGetChildren_t)(void *);
+typedef void *(*IOHIDEventGetChild_t)(void *, int);
 static IOHIDEventGetType_t pGetType = NULL;
 static IOHIDEventGetSenderID_t pGetSender = NULL;
 static IOHIDEventGetIntegerValue_t pGetInt = NULL;
 static IOHIDEventGetFloatValue_t pGetFloat = NULL;
+static IOHIDEventGetChildren_t pGetChildren = NULL;
+static IOHIDEventGetChild_t pGetChild = NULL;
+
+static double gLastKeySec = 0; // 按键组分隔
+static bool gFiltered = false;
 
 // 事件类型名
 static const char *HKTypeName(uint32_t t) {
@@ -80,6 +87,12 @@ static const char *HKTypeName(uint32_t t) {
     }
 }
 
+static double HKNow() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
 // 读 UITouch 私有 ivar
 static uint32_t HKReadIvar(id obj, const char *name, size_t size) {
     Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
@@ -87,6 +100,62 @@ static uint32_t HKReadIvar(id obj, const char *name, size_t size) {
     uint64_t val = 0;
     memcpy(&val, (char *)(__bridge void *)obj + ivar_getOffset(iv), size);
     return (uint32_t)val;
+}
+
+// ---------- 打印单个 IOHIDEvent 字段 ----------
+static void HKPrintEventFields(void *event, int depth) {
+    if (!event) return;
+    uint32_t type = pGetType ? pGetType(event) : 0xFFFFFFFF;
+    uint64_t sender = pGetSender ? pGetSender(event) : 0;
+    char pad[16];
+    memset(pad, ' ', sizeof(pad));
+    pad[depth * 2] = 0;
+    HKLog("%sEV type=%u(%s) sender=0x%llx", pad, type, HKTypeName(type), (unsigned long long)sender);
+    if (!pGetInt) return;
+    // 键盘
+    uint32_t usagePage = pGetInt(event, 0x0D);
+    uint32_t usage = pGetInt(event, 0x0E);
+    uint32_t down = pGetInt(event, 0x0F);
+    if (type == 3 || usagePage || usage) {
+        HKLog("%s  KB usagePage=0x%x usage=0x%x down=%u", pad, usagePage, usage, down);
+    }
+    // 按钮
+    uint32_t btn = pGetInt(event, 0x03);
+    if (type == 2 || btn) {
+        HKLog("%s  BTN mask=0x%x", pad, btn);
+    }
+    // 滚轮
+    if (type == 14) {
+        double sx = pGetFloat ? pGetFloat(event, 0x3B) : 0;
+        double sy = pGetFloat ? pGetFloat(event, 0x3C) : 0;
+        HKLog("%s  SCROLL x=%f y=%f", pad, sx, sy);
+    }
+    // Digitizer
+    if (type == 11) {
+        double dx = pGetFloat ? pGetFloat(event, 0x23) : 0;
+        double dy = pGetFloat ? pGetFloat(event, 0x24) : 0;
+        double dz = pGetFloat ? pGetFloat(event, 0x25) : 0;
+        double press = pGetFloat ? pGetFloat(event, 0x2D) : 0;
+        uint32_t emask = pGetInt(event, 0x2A);
+        uint32_t tindex = pGetInt(event, 0x28);
+        uint32_t tident = pGetInt(event, 0x29);
+        uint32_t ttype = pGetInt(event, 0x27);
+        uint32_t btns = pGetInt(event, 0x26);
+        HKLog("%s  DIG X=%f Y=%f Z=%f press=%f mask=0x%x idx=%u ident=%u type=%u btn=0x%x",
+              pad, dx, dy, dz, press, emask, tindex, tident, ttype, btns);
+    }
+    // 子事件递归（最多2层）
+    if (depth < 2 && pGetChildren) {
+        CFArrayRef kids = pGetChildren(event);
+        if (kids) {
+            CFIndex n = CFArrayGetCount(kids);
+            for (CFIndex i = 0; i < n; i++) {
+                void *child = (void *)CFArrayGetValueAtIndex(kids, i);
+                HKPrintEventFields(child, depth + 1);
+            }
+            CFRelease(kids);
+        }
+    }
 }
 
 // ---------- 打印 UITouch ----------
@@ -100,60 +169,52 @@ static void HKPrintTouch(UITouch *t) {
           (long)t.phase, loc.x, loc.y, wloc.x, wloc.y, pathId, touchId);
 }
 
-// ---------- 打印转换结果 UIEvent ----------
+// ---------- 打印 UIEvent ----------
+static void HKPrintUIEvent(UIEvent *ev, const char *tag) {
+    HKLog("%s UIEvent type=%ld subtype=%ld touches=%lu",
+          tag, (long)ev.type, (long)ev.subtype, (unsigned long)ev.allTouches.count);
+    for (UITouch *t in ev.allTouches) HKPrintTouch(t);
+}
+
+// ---------- 打印转换结果（数组/UIEvent/其他） ----------
 static void HKPrintUIEventResult(id result) {
     if (!result) { HKLog("    → 转换结果 = nil"); return; }
     Class rc = object_getClass(result);
     HKLog("    → 转换结果 isa=%s", rc ? class_getName(rc) : "?");
-    if ([result isKindOfClass:[UIEvent class]]) {
-        UIEvent *ev = (UIEvent *)result;
-        HKLog("    → UIEvent type=%ld subtype=%ld touches=%lu",
-              (long)ev.type, (long)ev.subtype, (unsigned long)ev.allTouches.count);
-        for (UITouch *t in ev.allTouches) HKPrintTouch(t);
+    if ([result isKindOfClass:[NSArray class]]) {
+        NSArray *arr = (NSArray *)result;
+        HKLog("    → 数组 count=%lu", (unsigned long)arr.count);
+        for (id obj in arr) {
+            Class oc = object_getClass(obj);
+            HKLog("      [元素] isa=%s", oc ? class_getName(oc) : "?");
+            if ([obj isKindOfClass:[UIEvent class]]) {
+                HKPrintUIEvent((UIEvent *)obj, "        ");
+            } else {
+                NSString *desc = [obj description];
+                if (desc && desc.length) HKLog("      [元素] desc=%@", desc);
+            }
+        }
+    } else if ([result isKindOfClass:[UIEvent class]]) {
+        HKPrintUIEvent((UIEvent *)result, "        ");
+    } else {
+        NSString *desc = [result description];
+        if (desc && desc.length) HKLog("      desc=%@", desc);
     }
 }
 
-// ---------- 打印 IOHIDEvent（过滤心跳） ----------
+// ---------- 打印事件入口（含过滤 + 分隔线） ----------
 static void HKPrintEvent(void *event) {
     if (!event) return;
     uint32_t type = pGetType ? pGetType(event) : 0xFFFFFFFF;
     uint64_t sender = pGetSender ? pGetSender(event) : 0;
-
-    // 过滤：type=17 compat 心跳、type=11 空闲(0x8000000800a15173)
-    if (type == 17) return;
-    if (type == 11 && sender == 0x8000000800a15173ull) return;
-
-    HKLog("    type=%u(%s) sender=0x%llx", type, HKTypeName(type), (unsigned long long)sender);
-    if (!pGetInt) return;
-    // Keyboard 字段
-    uint32_t usagePage = pGetInt(event, 0x0D);
-    uint32_t usage = pGetInt(event, 0x0E);
-    uint32_t down = pGetInt(event, 0x0F);
-    if (type == 3 || usagePage || usage) {
-        HKLog("        KB usagePage=0x%x usage=0x%x down=%u", usagePage, usage, down);
+    if (type == 17) return;                          // compat 心跳
+    if (type == 11 && sender == 0x8000000800a15173ull) return;  // digitizer 空闲
+    double now = HKNow();
+    if (now - gLastKeySec > 0.5) {
+        HKLog("  ---- 按键簇分隔 ----");
     }
-    // Button / Pointer
-    uint32_t btn = pGetInt(event, 0x03);
-    if (type == 2 || btn) {
-        HKLog("        BTN mask=0x%x", btn);
-    }
-    // Scroll
-    if (type == 14) {
-        double sx = pGetFloat ? pGetFloat(event, 0x3B) : 0;
-        double sy = pGetFloat ? pGetFloat(event, 0x3C) : 0;
-        HKLog("        Scroll x=%f y=%f", sx, sy);
-    }
-    // Digitizer：float X/Y + 事件掩码 + 触摸索引
-    if (type == 11) {
-        double dx = pGetFloat ? pGetFloat(event, 0x23) : 0;
-        double dy = pGetFloat ? pGetFloat(event, 0x24) : 0;
-        uint32_t emask = pGetInt(event, 0x2A);       // EventMask
-        uint32_t tindex = pGetInt(event, 0x28);       // Index
-        uint32_t tident = pGetInt(event, 0x29);       // Identity
-        uint32_t ttype = pGetInt(event, 0x27);        // Type
-        HKLog("        DIG X=%f Y=%f mask=0x%x idx=%u ident=%u type=%u",
-              dx, dy, emask, tindex, tident, ttype);
-    }
+    gLastKeySec = now;
+    HKPrintEventFields(event, 1);
 }
 
 // ---------- IMP 对 ----------
@@ -188,6 +249,13 @@ static void *HKImp5(id self, SEL _cmd, void *event) {
 static IMP gOrig6;
 static void *HKImp6(id self, SEL _cmd, id evt) {
     return ((void *(*)(id, SEL, id))gOrig6)(self, _cmd, evt);
+}
+// UIApplication -sendEvent:（UIKit 分发最终入口）
+static IMP gOrigSend;
+static void HKImpSend(id self, SEL _cmd, UIEvent *event) {
+    HKLog("[UIApp] sendEvent:");
+    if (event) HKPrintUIEvent(event, "    ");
+    ((void (*)(id, SEL, UIEvent *))gOrigSend)(self, _cmd, event);
 }
 
 // ---------- hook ----------
@@ -227,12 +295,14 @@ static void HKInit() {
         pGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
         pGetInt = (IOHIDEventGetIntegerValue_t)dlsym(iokit, "IOHIDEventGetIntegerValue");
         pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
+        pGetChildren = (IOHIDEventGetChildren_t)dlsym(iokit, "IOHIDEventGetChildren");
+        pGetChild = (IOHIDEventGetChild_t)dlsym(iokit, "IOHIDEventGetChild");
     }
     HKLog("==================================================");
-    HKLog("HIDKeySniffer v1.0.7 已注入 %s (pid=%d)", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid());
+    HKLog("HIDKeySniffer v1.0.8 已注入 %s (pid=%d)", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid());
     HKLog("容器日志路径: %s", gContainerPath);
-    HKLog("IOKit解析: type=%d sender=%d int=%d float=%d",
-          pGetType != NULL, pGetSender != NULL, pGetInt != NULL, pGetFloat != NULL);
+    HKLog("IOKit解析: type=%d sender=%d int=%d float=%d children=%d",
+          pGetType != NULL, pGetSender != NULL, pGetInt != NULL, pGetFloat != NULL, pGetChildren != NULL);
     HKLog("--- hook 开始 ---");
     HKHookSpec specs[] = {
         { "UIEventFetcher", "_receiveHIDEvent:", "^{__IOHIDEvent=}", &gOrig1, (IMP)HKImp1 },
@@ -241,9 +311,10 @@ static void HKInit() {
         { "_UIUpdateHIDInput", "addEvent:", "^{__IOHIDEvent=}", &gOrig4, (IMP)HKImp4 },
         { "_UIUpdateHIDDigitizerInput", "addEvent:", "^{__IOHIDEvent=}", &gOrig5, (IMP)HKImp5 },
         { "HIDEventService", "dispatchEvent:", "v24@0:8@16", &gOrig6, (IMP)HKImp6 },
+        { "UIApplication", "sendEvent:", "@16", &gOrigSend, (IMP)HKImpSend },
     };
     for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) HKSwizzleSpec(&specs[i]);
     HKLog("--- hook 结束 ---");
-    HKLog("初始化完成。只按翻页器7键（每键按1次，间隔1秒），看每个键的 UIKit 转换结果");
+    HKLog("初始化完成。只按翻页器7键（每键按1次，间隔2秒），每组按键会打分隔线");
     HKLog("==================================================");
 }
