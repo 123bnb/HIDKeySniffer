@@ -17,6 +17,7 @@
 // ============================================================
 
 #define HK_LOG_PATH "/var/mobile/Documents/HIDKeySniffer.log"
+#define HK_LOG_PATH_TMP "/tmp/HIDKeySniffer.log"
 
 static void HKLog(const char *fmt, ...) {
     va_list ap;
@@ -31,10 +32,14 @@ static void HKLog(const char *fmt, ...) {
     localtime_r(&sec, &tmv);
     char tbuf[64];
     strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tmv);
-    FILE *f = fopen(HK_LOG_PATH, "a");
-    if (f) {
-        fprintf(f, "%s.%03d %s\n", tbuf, (int)(tv.tv_usec / 1000), buf);
-        fclose(f);
+    // 写两个路径，任一失败不影响另一个（backboardd 沙盒可能限制 Documents）
+    const char *paths[] = { HK_LOG_PATH, HK_LOG_PATH_TMP };
+    for (int i = 0; i < 2; i++) {
+        FILE *f = fopen(paths[i], "a");
+        if (f) {
+            fprintf(f, "%s.%03d %s\n", tbuf, (int)(tv.tv_usec / 1000), buf);
+            fclose(f);
+        }
     }
 }
 
@@ -108,7 +113,7 @@ static void HKInit() {
         pGetInt = (IOHIDEventGetIntegerValue_t)dlsym(iokit, "IOHIDEventGetIntegerValue");
     }
     HKLog("==================================================");
-    HKLog("HIDKeySniffer v1.0.2 已注入 backboardd (pid=%d)", getpid());
+    HKLog("HIDKeySniffer v1.0.3 已注入 backboardd (pid=%d)", getpid());
     HKLog("IOKit解析: type=%d sender=%d int=%d",
           pGetType != NULL, pGetSender != NULL, pGetInt != NULL);
 
