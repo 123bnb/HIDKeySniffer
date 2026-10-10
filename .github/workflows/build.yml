@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=HIDKeySniffer-1.0.3-roothide.deb
+          DEB=HIDKeySniffer-1.0.4-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.3
-          NOTES=$'HIDKeySniffer v1.0.3（roothide 直装）—— backboardd 层 HID 键码抓取\n\n【本次更新】\n日志双路径写入：/tmp/HIDKeySniffer.log（保底，绝对可写）+ /var/mobile/Documents/HIDKeySniffer.log\n\n【为什么 v1.0.2 无日志】\nbackboardd 是常驻 daemon，注销(respring)不会重启它 → dylib 根本没被加载。\n必须【重启手机】（关机再开机），不能只注销！\n\n【怎么测】\n1. 卸载旧版 HIDKeySniffer，安装 v1.0.3\n2. 【重启手机】（关键！不是注销）\n3. 关闭辅助触控\n4. 用翻页器 7 键各按 2~3 下\n5. Filza 读 /tmp/HIDKeySniffer.log 或 /var/mobile/Documents/HIDKeySniffer.log\n   能看到「v1.0.3 已注入 backboardd」就说明加载成功，把按键日志发我\n\n【注意】只读不修改，原事件原样放行；万一异常进安全模式，卸载即可恢复'
+          TAG=v1.0.4
+          NOTES=$'HIDKeySniffer v1.0.4（roothide 直装）—— App 进程自 dump 诊断版\n\n【架构彻底改变，为什么】\n你的翻页器是 BLE 键盘+鼠标二合一：音量2键=Consumer键，方向/点击5键=鼠标事件且只路由前台App。\nbackboardd 常驻不随注销重启、SpringBoard 收不到鼠标事件、Preferences 层只能拿触摸轨迹（且依赖辅助触控）。\n结论：只有【注入前台App（番茄小说）】才能抓到全部7键的原始HID事件。\n\n【本版做什么】\n注入 com.dragon.read，启动时自动 dump：\n1. 进程内所有含 HID/Event/Key/Touch 的类和方法名+签名（锁定 iOS16.4.1 真实 hook 点，不再靠猜）\n2. 尝试 hook 6 个候选入口（存在且单对象参数才 hook，不存在只打日志）\n3. 事件到达时递归打印整棵事件树：type/senderID/usagePage/keyCode/usage/坐标/按键/滚轮\n\n【日志位置】\nApp 容器 Documents/HIDKeySniffer.log（保底可写）+ /var/mobile/Documents/HIDKeySniffer.log（试写）\nFilza → 长按番茄小说 → App容器/文档 里看 HIDKeySniffer.log；或 Filza 直接看 /var/mobile/Documents\n\n【怎么测】\n1. 卸载旧版 HIDKeySniffer，安装 v1.0.4，正常注销（不需要重启手机！）\n2. 关闭辅助触控\n3. 打开番茄小说，7 键各按 2~3 下\n4. 把日志文件内容发我（优先容器 Documents 那份）\n\n【安全】只读不修改，原事件原样放行，不碰 backboardd、不用重启手机'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "HIDKeySniffer v1.0.3" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "HIDKeySniffer v1.0.4" --notes "$NOTES"
           fi
