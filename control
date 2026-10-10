@@ -1,6 +1,6 @@
 Package: com.yourname.hidkeysniffer
 Name: HIDKeySniffer
-Version: 1.0.7
+Version: 1.0.8
 Architecture: iphoneos-arm64e
 Description: 自dump诊断版：注入番茄小说进程，抓蓝牙翻页器7键完整HID事件树+真实hook点
 Maintainer: 123bnb
