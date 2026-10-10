@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=HIDKeySniffer-1.0.5-roothide.deb
+          DEB=HIDKeySniffer-1.0.6-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.5
-          NOTES=$'HIDKeySniffer v1.0.5（roothide 直装）—— 自dump诊断版 v2\n\n【本次更新】基于 v1.0.4 实机日志修正：\n1. v1.0.4 dump 已确认 iOS16.4.1 真实入口：\n   UIEventFetcher._receiveHIDEvent:（所有HID事件唯一入口）\n   UIApplication.handleKeyHIDEvent: / _UIHIDTransformer.handleHIDEvent: / _UIUpdateHIDInput.addEvent: / HIDEventService.dispatchEvent:\n2. 修复我自己的hook判定bug（把 ^{__IOHIDEvent=} 指针参数当非对象跳过），按实机签名needle匹配\n3. 一次挂满6个真实入口，事件来了打印 type/senderID/usage/keyCode/坐标/按键 + isa\n\n【日志位置】\nApp 容器 Documents/HIDKeySniffer.log（保底）+ /var/mobile/Documents/HIDKeySniffer.log（试写）\n\n【怎么测】\n1. 装 v1.0.5 → 注销（不需要重启手机！）\n2. 关闭辅助触控\n3. 打开番茄小说，7 键各按 2~3 下\n4. 把日志发我（优先容器 Documents 那份）\n\n【安全】只读不修改，原事件原样放行'
+          TAG=v1.0.6
+          NOTES=$'HIDKeySniffer v1.0.6（roothide 直装）—— 自dump诊断版 v3\n\n【本次更新】\n修复编译错误：ARC 下 objc_msgSend 未声明，改 methodForSelector 取 IMP 调用字段方法\n\n【功能不变】\n注入番茄小说，hook 6 个真实 HID 入口（UIEventFetcher._receiveHIDEvent: 等），\n事件打印 type/senderID/usage/keyCode/坐标/按键 + isa，只读不修改原样放行\n\n【怎么测】\n1. 装 v1.0.6 → 注销\n2. 关闭辅助触控\n3. 打开番茄小说，7 键各按 2~3 下\n4. 把容器 Documents/HIDKeySniffer.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "HIDKeySniffer v1.0.5" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "HIDKeySniffer v1.0.6" --notes "$NOTES"
           fi
