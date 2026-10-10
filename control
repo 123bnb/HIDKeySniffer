@@ -1,8 +1,8 @@
 Package: com.yourname.hidkeysniffer
 Name: HIDKeySniffer
-Version: 1.0.3
+Version: 1.0.4
 Architecture: iphoneos-arm64e
-Description: 读取蓝牙翻页器每个键的 HID 键码（backboardd 层抓取诊断）
+Description: 自dump诊断版：注入番茄小说进程，抓蓝牙翻页器7键完整HID事件树+真实hook点
 Maintainer: 123bnb
 Author: 123bnb
 Section: Tweaks
